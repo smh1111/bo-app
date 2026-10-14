@@ -2,17 +2,32 @@
 
 import json
 import os
+import re
 
 from . import db, prompts, tools
 
 MODEL = os.environ.get("BO_MODEL", "claude-haiku-4-5-20251001")
 MAX_ROUNDS = 8
 
+# Tools that change something. If Bo says "done" without one of these succeeding, it's not done.
+CHANGING_TOOLS = {"reschedule_appointment", "add_appointment"}
+CLAIMS_DONE = re.compile(
+    r"\b(all set|done|moved|rescheduled|is now|i've (changed|updated|added|booked|saved)|"
+    r"i have (changed|updated|added|booked|saved)|has been (moved|changed|updated|added|booked|saved))\b",
+    re.IGNORECASE,
+)
+NOTES_MARK = "\n\n[Bo's notes, not shown to the person:"
+
 
 def _client():
     from anthropic import Anthropic
 
     return Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+
+def _summarize(name, args, result):
+    """A short, id-carrying line about one tool call, saved for Bo's next turn."""
+    return f"{name}({json.dumps(args, default=str)}) -> {json.dumps(result, default=str)[:600]}"
 
 
 def run_turn(conn, person, user_text, channel, client=None):
@@ -27,6 +42,10 @@ def run_turn(conn, person, user_text, channel, client=None):
     messages = list(history)
 
     reply = "Sorry, I got a little mixed up. Could you say that again?"
+    notes = []            # what the tools returned this turn (ids, times), kept for next turn
+    changed = False       # did a changing tool succeed this turn?
+    nudged = False
+
     for _ in range(MAX_ROUNDS):
         resp = client.messages.create(
             model=MODEL,
@@ -47,6 +66,22 @@ def run_turn(conn, person, user_text, channel, client=None):
 
         if resp.stop_reason != "tool_use":
             text = "".join(c["text"] for c in content if c["type"] == "text").strip()
+
+            # Guard: Bo claims a change happened, but no changing tool succeeded this turn.
+            if text and not changed and not nudged and CLAIMS_DONE.search(text):
+                nudged = True
+                print(f"[guard] reply claimed a change without a tool: {text[:120]!r}")
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "(System check, not from the person: you have not called reschedule_appointment "
+                        "or add_appointment in this turn, so nothing has been changed yet. If the person "
+                        "has clearly confirmed, look up the ids you need and call the tool now. Otherwise, "
+                        "do not say it is done.)"
+                    ),
+                })
+                continue
+
             if text:
                 reply = text
             break
@@ -55,9 +90,16 @@ def run_turn(conn, person, user_text, channel, client=None):
         for tu in tool_uses:
             result = tools.run(conn, person, tu.name, tu.input)
             print(f"[tool] {tu.name} {json.dumps(tu.input)} -> {json.dumps(result, default=str)[:300]}")
+            if tu.name in CHANGING_TOOLS and isinstance(result, dict) and result.get("ok"):
+                changed = True
+            notes.append(_summarize(tu.name, tu.input, result))
             results.append({"type": "tool_result", "tool_use_id": tu.id, "content": json.dumps(result, default=str)})
         messages.append({"role": "user", "content": results})
 
+    saved_reply = reply
+    if notes:
+        saved_reply += NOTES_MARK + " " + " | ".join(notes)[:1500] + "]"
+
     db.save_message(conn, person["id"], "user", user_text, channel)
-    db.save_message(conn, person["id"], "assistant", reply, channel)
+    db.save_message(conn, person["id"], "assistant", saved_reply, channel)
     return reply

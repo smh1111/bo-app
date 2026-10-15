@@ -49,9 +49,9 @@ def get_available_slots(conn, person, args):
         return {"error": "No upcoming appointment with that id for this person."}
     rows = conn.execute(
         """select * from open_slots
-           where provider = %s and not taken and starts_at > now()
+           where person_id = %s and provider = %s and not taken and starts_at > now()
            order by starts_at limit 5""",
-        (appt["provider"],),
+        (person["id"], appt["provider"]),
     ).fetchall()
     return {
         "appointment_id": appt["id"],
@@ -74,13 +74,14 @@ def reschedule_appointment(conn, person, args):
         slot = conn.execute(
             "select * from open_slots where id = %s for update", (slot_id,)
         ).fetchone()
-        if not slot or slot["taken"] or slot["provider"] != appt["provider"]:
+        if (not slot or slot["taken"] or slot["provider"] != appt["provider"]
+                or slot["person_id"] != person["id"]):
             return {"ok": False, "error": "That time is no longer available. Check open slots again."}
         conn.execute("update open_slots set taken = true where id = %s", (slot_id,))
         # The old time goes back on the clinic's calendar.
         conn.execute(
-            "insert into open_slots (provider, starts_at) values (%s, %s)",
-            (appt["provider"], appt["starts_at"]),
+            "insert into open_slots (person_id, provider, starts_at) values (%s, %s, %s)",
+            (person["id"], appt["provider"], appt["starts_at"]),
         )
         conn.execute(
             "update appointments set starts_at = %s where id = %s", (slot["starts_at"], appt["id"])

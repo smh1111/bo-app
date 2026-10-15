@@ -9,7 +9,11 @@ bo/tools.py             the 5 appointment tools, shared by texting and calling
 bo/db.py                database helpers, phone-number allowlist
 bo/prompts.py           Bo's instructions (texting + voice)
 sql/schema.sql          create the tables (run once)
-sql/reset_demo.sql      fill in made-up appointments (run before each demo)
+sql/reset_demo.sql      fill in made-up appointments for you (run before each demo)
+sql/migrate_testers.sql one-time upgrade for tester sign-up
+sql/cleanup_testers.sql delete testers older than 14 days
+bo/demo.py              tester sign-up from trustbo.ai + their sample appointments
+bo/portal.py            the pretend "Maple Health" portal page each tester sees
 elevenlabs/             the voice prompt and tool setup to paste into ElevenLabs
 requirements.txt        Python packages
 ```
@@ -61,6 +65,24 @@ Follow the voice build plan. You'll need:
 - `elevenlabs/tools.md`, for the 5 webhook tools.
 - Conversation initiation webhook: `https://<your-project>.vercel.app/api/voice/init` with header `X-Bo-Secret`.
 - Post-call webhook: `https://<your-project>.vercel.app/api/voice/post-call`. Put its signing secret in Vercel as `ELEVENLABS_WEBHOOK_SECRET` and redeploy.
+
+## Tester sign-up ("Try the live demo" on trustbo.ai)
+Anyone can sign up on trustbo.ai with a US mobile number. Bo's app then:
+- creates them as a tester (they're let in alongside `ALLOWED_NUMBERS`),
+- gives them 3 sample appointments and their own open slots,
+- returns a private portal link: `https://<your-project>.vercel.app/portal/<code>`.
+
+Optional settings in Vercel → Environment Variables (redeploy after changing):
+
+| Name | What it does |
+|---|---|
+| `TESTER_CAP` | Max testers at once. Default `25`. |
+| `WHATSAPP_JOIN_CODE` | Your sandbox join code. Default `join away-new`. Set it if Twilio gives you a new one. |
+| `BO_PHONE_NUMBER` | Number testers call. Default `+16506093471`. |
+| `SIGNUP_ORIGINS` | Extra websites allowed to use the sign-up form, comma-separated. trustbo.ai is already allowed. |
+
+See who signed up: `select name, phone, created_at from people where is_tester order by created_at desc;`
+Delete old testers: run `sql/cleanup_testers.sql`.
 
 ## When something breaks
 - **No reply on WhatsApp:** Twilio Console → **Monitor → Logs → Errors**. Error 11200 means Bo's address failed or answered with an error.

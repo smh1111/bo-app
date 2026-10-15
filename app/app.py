@@ -6,6 +6,8 @@ Routes
   POST /api/voice/init         ElevenLabs: "who is calling?" (while the phone rings)
   POST /api/tools/<name>       ElevenLabs: run one of Bo's tools during a call
   POST /api/voice/post-call    ElevenLabs: save the transcript after the call
+  POST /api/signup             trustbo.ai "Try Bo" form: create a tester with a demo account
+  GET  /portal/<token>         the tester's pretend clinic portal (Maple Health)
 """
 
 import hashlib
@@ -16,7 +18,7 @@ import time
 
 from flask import Flask, Response, abort, jsonify, request
 
-from bo import agent, db, prompts, tools
+from bo import agent, db, demo, portal, prompts, tools
 
 app = Flask(__name__)
 
@@ -111,11 +113,10 @@ def sms():
     channel = "whatsapp" if sender.startswith("whatsapp:") else "sms"
     phone = db.normalize_phone(sender)
 
-    if not db.is_allowed(phone):
-        print(f"[sms] ignored message from {phone} (not in ALLOWED_NUMBERS)")
-        return twiml()
-
     with db.connect() as conn:
+        if not db.is_allowed(conn, phone):
+            print(f"[sms] ignored message from {phone} (not allowed or signed up)")
+            return twiml()
         person = db.get_or_create_person(conn, phone)
 
         if not person["consented_at"]:
@@ -140,7 +141,7 @@ def voice_init():
     phone = db.normalize_phone(data.get("caller_id", ""))
 
     with db.connect() as conn:
-        if not db.is_allowed(phone):
+        if not db.is_allowed(conn, phone):
             person, status = None, "blocked"
         else:
             person = db.get_or_create_person(conn, phone)
@@ -173,10 +174,10 @@ def voice_tool(name):
         abort(401)
     args = request.get_json(force=True, silent=True) or {}
     phone = db.normalize_phone(str(args.pop("caller_phone", "")))
-    if not db.is_allowed(phone):
-        return jsonify(error="This caller isn't allowed to use Bo."), 403
 
     with db.connect() as conn:
+        if not db.is_allowed(conn, phone):
+            return jsonify(error="This caller isn't allowed to use Bo."), 403
         person = db.person_by_phone(conn, phone)
         if not person:
             return jsonify(error="Unknown caller."), 403
@@ -215,6 +216,67 @@ def voice_post_call():
                 db.save_message(conn, person["id"], role, text, "voice")
                 saved += 1
     return jsonify(ok=True, saved=saved)
+
+
+# ── tester sign-up (trustbo.ai) ───────────────────────────────────────────
+SIGNUP_ORIGINS = {
+    "https://trustbo.ai",
+    "https://www.trustbo.ai",
+    "https://beamish-hamster-f3a4c4.netlify.app",
+} | {o.strip() for o in os.environ.get("SIGNUP_ORIGINS", "").split(",") if o.strip()}
+
+
+def with_cors(resp):
+    origin = request.headers.get("Origin", "")
+    if origin in SIGNUP_ORIGINS:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Vary"] = "Origin"
+        resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        resp.headers["Access-Control-Max-Age"] = "86400"
+    return resp
+
+
+@app.route("/api/signup", methods=["POST", "OPTIONS"])
+def signup():
+    if request.method == "OPTIONS":
+        return with_cors(Response(status=204))
+
+    data = request.get_json(force=True, silent=True) or request.form.to_dict() or {}
+    if data.get("website"):  # hidden field only bots fill in
+        return with_cors(jsonify(ok=False, error="bot")), 400
+    if data.get("consent") not in (True, "true", "on", "1", 1):
+        return with_cors(jsonify(ok=False, field="consent", error="Tick the box to agree.")), 400
+
+    try:
+        with db.connect() as conn:
+            person = demo.sign_up(conn, data.get("name"), data.get("phone"), data.get("timezone"))
+    except demo.SignupError as e:
+        return with_cors(jsonify(ok=False, field=e.code, error=e.message)), e.status
+
+    host = request.headers.get("X-Forwarded-Host", request.host)
+    join = os.environ.get("WHATSAPP_JOIN_CODE", "join away-new").strip()
+    return with_cors(jsonify(
+        ok=True,
+        name=person["name"],
+        phone=demo.pretty_phone(person["phone"]),
+        portal_url=f"https://{host}/portal/{person['portal_token']}",
+        call_number=os.environ.get("BO_PHONE_NUMBER", "+16506093471"),
+        whatsapp=({
+            "number": os.environ.get("WHATSAPP_NUMBER", "+14155238886"),
+            "join": join if join.lower().startswith("join ") else f"join {join}",
+        } if join else None),
+    ))
+
+
+@app.get("/portal/<token>")
+def patient_portal(token):
+    with db.connect() as conn:
+        html, status = portal.render(conn, token)
+    resp = Response(html, status=status, mimetype="text/html")
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Robots-Tag"] = "noindex"
+    return resp
 
 
 if __name__ == "__main__":

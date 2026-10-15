@@ -32,9 +32,16 @@ def allowed_numbers():
     return {normalize_phone(p) for p in raw.split(",") if p.strip()}
 
 
-def is_allowed(phone):
-    allow = allowed_numbers()
-    return bool(phone) and phone in allow
+def is_allowed(conn, phone):
+    """Your own numbers (ALLOWED_NUMBERS) plus anyone who signed up as a tester on trustbo.ai."""
+    if not phone:
+        return False
+    if phone in allowed_numbers():
+        return True
+    row = conn.execute(
+        "select 1 from people where phone = %s and is_tester", (phone,)
+    ).fetchone()
+    return row is not None
 
 
 # ── people ────────────────────────────────────────────────────────────────

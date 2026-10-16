@@ -493,7 +493,9 @@
       cursor: pointer; transition: opacity 0.15s;
     }
     .try-form button:hover { opacity: 0.85; }
-    .try-form button:disabled { opacity: 0.6; cursor: wait; }
+    .try-form button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .try-form button:disabled:hover { opacity: 0.45; }
+    .try-form button.is-busy { opacity: 0.7; cursor: wait; }
     .try-form button:focus-visible, .try-copy-btn:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
     .try-error { font-size: 0.8rem; color: #a5543a; }
     .try-note { font-size: 0.8rem; color: var(--muted); text-align: center; }
@@ -671,7 +673,7 @@
           </label>
           <input type="text" name="website" id="try-website" tabindex="-1" autocomplete="off" aria-hidden="true" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0;" />
           <p class="try-error" id="try-error" hidden>Add your first name and a 10-digit US mobile number, then tick the box.</p>
-          <button type="submit" id="try-submit">Add my number</button>
+          <button type="submit" id="try-submit" disabled>Add my number</button>
           <p class="try-note">Your number and demo account are deleted after 24 hours.</p>
         </form>
       </div>
@@ -830,17 +832,40 @@
     }
     function showError(msg) { err.textContent = msg; err.hidden = false; }
 
+    var nameEl = document.getElementById('try-name');
+    var phoneEl = document.getElementById('try-phone');
+    var consentEl = document.getElementById('try-consent');
+    var busy = false;
+
+    function readForm() {
+      var digits = phoneEl.value.replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+      return {
+        name: nameEl.value.trim(),
+        phone: phoneEl.value,
+        ok: nameEl.value.trim() !== '' && digits.length === 10 && consentEl.checked
+      };
+    }
+    // The button only turns on once the name, a 10-digit number and the consent box are all filled in.
+    function updateButton() {
+      btn.disabled = busy || !readForm().ok;
+      if (!btn.disabled) err.hidden = true;
+    }
+    ['input', 'change', 'keyup'].forEach(function (ev) {
+      nameEl.addEventListener(ev, updateButton);
+      phoneEl.addEventListener(ev, updateButton);
+      consentEl.addEventListener(ev, updateButton);
+    });
+    updateButton();
+    setTimeout(updateButton, 500);  // catch browser autofill
+
     form.addEventListener('submit', function (e) {
       e.preventDefault();
-      var name = document.getElementById('try-name').value.trim();
-      var phone = document.getElementById('try-phone').value;
-      var digits = phone.replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
-      var consent = document.getElementById('try-consent').checked;
-      if (!name || digits.length !== 10 || !consent) {
-        showError('Add your first name and a 10-digit US mobile number, then tick the box.');
-        return;
-      }
+      var f = readForm();
+      var name = f.name, phone = f.phone;
+      if (!f.ok || busy) { updateButton(); return; }
       err.hidden = true;
+      busy = true;
+      btn.classList.add('is-busy');
       btn.disabled = true;
       btn.textContent = 'Setting up your demo…';
 
@@ -885,8 +910,10 @@
         showError('We couldn\'t reach Bo just now. Check your connection and try again.');
       })
       .finally(function () {
-        btn.disabled = false;
+        busy = false;
+        btn.classList.remove('is-busy');
         btn.textContent = 'Add my number';
+        updateButton();
       });
     });
 

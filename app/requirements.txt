@@ -1,5 +1,0 @@
-flask>=3.0
-anthropic>=0.40
-twilio>=9.0
-psycopg[binary]>=3.2
-tzdata

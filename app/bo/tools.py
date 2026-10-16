@@ -74,8 +74,20 @@ def reschedule_appointment(conn, person, args):
         slot = conn.execute(
             "select * from open_slots where id = %s for update", (slot_id,)
         ).fetchone()
-        if (not slot or slot["taken"] or slot["provider"] != appt["provider"]
-                or slot["person_id"] != person["id"]):
+        if not slot or slot["provider"] != appt["provider"] or slot["person_id"] != person["id"]:
+            return {"ok": False, "error": "That time is no longer available. Check open slots again."}
+        if slot["taken"]:
+            # Same request arriving twice (a retry, or the AI calling the tool again):
+            # if the appointment is already at this time, the move already happened.
+            if appt["starts_at"] == slot["starts_at"]:
+                print(f"[tool] reschedule_appointment repeated; appointment {appt['id']} already moved")
+                return {
+                    "ok": True,
+                    "already_done": True,
+                    "title": appt["title"],
+                    "provider": appt["provider"],
+                    "new_time": say_time(slot["starts_at"], person),
+                }
             return {"ok": False, "error": "That time is no longer available. Check open slots again."}
         conn.execute("update open_slots set taken = true where id = %s", (slot_id,))
         # The old time goes back on the clinic's calendar.

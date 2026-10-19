@@ -10,9 +10,9 @@ MODEL = os.environ.get("BO_MODEL", "claude-haiku-4-5-20251001")
 MAX_ROUNDS = 8
 
 # Tools that change something. If Bo says "done" without one of these succeeding, it's not done.
-CHANGING_TOOLS = {"reschedule_appointment", "add_appointment"}
+CHANGING_TOOLS = {"reschedule_appointment", "add_appointment", "cancel_appointment"}
 CLAIMS_DONE = re.compile(
-    r"\b(all set|done|moved|rescheduled|is now|i've (changed|updated|added|booked|saved)|"
+    r"\b(all set|done|moved|rescheduled|cancell?ed|is now|i've (changed|updated|added|booked|saved|cancell?ed)|"
     r"i have (changed|updated|added|booked|saved)|has been (moved|changed|updated|added|booked|saved))\b",
     re.IGNORECASE,
 )
@@ -31,12 +31,36 @@ def _summarize(name, args, result):
     return f"{name}({json.dumps(args, default=str)}) -> {json.dumps(result, default=str)[:600]}"
 
 
+def live_appointments_text(conn, person):
+    """Bo's chat history can hold old times (a change made on a phone call, in the portal, or
+    earlier in the chat). So every turn starts from a fresh read of the appointments table."""
+    try:
+        appts = tools.get_appointments(conn, person, {})["appointments"]
+    except Exception as e:
+        print(f"[agent] couldn't preload appointments: {e}")
+        return "CURRENT APPOINTMENTS: unavailable right now; call get_appointments before answering."
+    if not appts:
+        listing = "none"
+    else:
+        listing = "\n".join(
+            f"- {a['title']}" + (f" with {a['provider']}" if a["provider"] else "")
+            + (f" at {a['location']}" if a["location"] else "") + f": {a['when']}"
+            for a in appts
+        )
+    return (
+        "CURRENT APPOINTMENTS (read from the clinic at the start of this message; this is the truth "
+        "and overrides any time mentioned earlier in the chat, on a phone call, or in your notes. "
+        "If you change something during this message, use the tool's result instead):\n" + listing
+    )
+
+
 def run_turn(conn, person, user_text, channel, client=None):
     """Handle one incoming message and return Bo's reply. Saves both sides to the database."""
     client = client or _client()
 
     history, past_notes = db.load_history_and_notes(conn, person["id"])
     system = prompts.sms_system(person)
+    system += "\n" + live_appointments_text(conn, person)
     if past_notes:
         system += (
             "\nRESULTS FROM YOUR EARLIER TOOL CALLS (for ids only; times may be out of date; "
@@ -86,8 +110,8 @@ def run_turn(conn, person, user_text, channel, client=None):
                 messages.append({
                     "role": "user",
                     "content": (
-                        "(System check, not from the person: you have not called reschedule_appointment "
-                        "or add_appointment in this turn, so nothing has been changed yet. If the person "
+                        "(System check, not from the person: you have not called reschedule_appointment, "
+                        "add_appointment or cancel_appointment in this turn, so nothing has been changed yet. If the person "
                         "has clearly confirmed, look up the ids you need and call the tool now. Otherwise, "
                         "do not say it is done.)"
                     ),
